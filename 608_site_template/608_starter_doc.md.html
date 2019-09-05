@@ -1,0 +1,257 @@
+                <meta charset="utf-8" emacsmode="-*- markdown -*-">
+                            **Team 55: 608-bike Final Report**
+
+Griffin Duffy, Richard Liu, Mindren Lu, Christian Scarlett 
+
+Overview
+===============================================================================
+
+For our 6.08 final project, we made a device for bikers to track their bike routes and upload them to a server, where they can compete against other users to record the best times for particular paths. We also implemented a website to allow for users to look over their recorded routes and browse other bike paths uploaded by other users as well.
+
+
+Demonstration of Mounting and Starting the Device
+-------------------------------------------------------------------------------
+
+![](https://youtu.be/-1K7lQb2I7o)
+
+Demonstration of Ending and Uploading a Route
+-------------------------------------------------------------------------------
+
+![](https://youtu.be/_DBIARgvHgs)
+
+System (ESP)
+===============================================================================
+
+Diagrams
+-------------------------------------------------------------------------------
+
+System Block Diagram:
+
+![](images/block_diagram.png)
+
+ESP State Machine Diagram:
+
+![](images/fsm.png)
+
+
+Parts
+-------------------------------------------------------------------------------
+
+All electronic parts of our device were included in the "base system" (ESP, GPS, LCD, two buttons). However, to attach the system to a bike, we used CAD software and 3D printing to create a mount. The system slots into the mount with elastic straps in case of bumps, and the mount attaches to a clamp that fits around the bike frame.
+
+![](images/front_view.jpg)
+
+![](images/back_view.jpg)
+
+![](images/side_view.jpg)
+
+Code Structure
+-------------------------------------------------------------------------------
+
+Detailed description of your code (what does each function or class do, what is the high-level role of each piece of the code?)
+
+Our code begins with the inclusion of the requisite libraries and the initialization of the Button class and necessary global variables.
+
+From there, our highest level functions all have to do with the parsing and extraction of data sent by the GPS. These functions include `extract`, `parseDate`, `parseLat`, `parseLon`, `extractGNRMC`, and `ddm_to_decimal`.
+
+The only location function called during the recording stage of the trip is `record_location`, which in turn calls the other previously mentioned high-level functions in order to update the array which keeps track of GPS coordinates.
+
+From there, we have multiple functions together, all designed to update the display. During the course of operation, these functions will be called when moving from state to state rather than updating the display in the case statement. We do this to provide modularity, making it easier to alter what our screen displays if desired without having to search through a bloated case statement.
+
+Following this, our primary state machine begins. This is where the logic for carrying out our intended functionality resides, and is the primary way through which a user interacts with the device.
+We have ten different states. The device begins in the `IDLE` state, where a user may choose to begin a trip, upload their previously completed route, or connect to WiFi. Choosing to begin a trip will move the device into the `GETTING_FIX` state followed by the `VERIFYING` state. `GETTING_FIX` is to ensure that the GPS _can_ record before beginning a trip.
+
+The `VERIFYING` state is to resolve a problem where the GPS may report that it has a fix before truly having an accurate grasp of the user's location. This may lead to situations in which the beginning of a user's path is made up of erratic points, potentially interfering with the server's pathfinding. To solve this, the `VERIFYING` state asks the user to remain stationary and waits until five GPS points in a row all come from the same location before proceeding to the `RECORDING` state.
+
+The `RECORDING` state is what the device will most likely spend the majority of its time in during the course of operation, and it composes the primary functionality of our device's purpose. While in the `RECORDING` state, the device will regularly record updates to an array with the user's position.
+
+Every state after the user exits the `RECORDING` has to do with either ending the trip and returning back to the `IDLE` state or connecting to WiFi and uploading the trip to our server, including: `ENDING_TRIP`, `UPLOADING`, `WIFI_CONNECT`, and `SHOW_RESULT`.
+
+This marks the end of the state machine. From this position, the only code left is helper functions for connecting and uploading to WiFi, and the ESP32 `setup()` and `loop()` functions.
+
+Resource Management
+-------------------------------------------------------------------------------
+
+Initially we were worried about storage issues with recording too many data points on the ESP, as all of it would be stored in the dynamic memory. To resolve this, we did some calculations (shown in calculations.py in the repository) to see how many points we could record giving ourselves 256kb of RAM. We considered the memory taken by the two floats and the char array generated for the POST request and found that gives us ~441 minutes of recording time, which is more than reasonable for a bike ride.
+
+We then moved on to potential battery limitations. To calculate our draw, we considered the situation where someone turns on the device, immediately attempts to start recording, records for as long as possible, and at the end POSTs their route. We considered the draw from the LCD, GPS, and ESP itself. This gives three states: getting a fix with the GPS; periodically recording the location; and POSTing the result. The first and last states ended up consuming a trivial amount of power compared to the second state; in total our numbers gave us ~457 minutes of recording time by limitations of battery.
+
+One of the biggest draws of power in our system was the LCD. Having it on constantly almost halves the time one can use the device. If we were to move forward with the project, we would implement conditional display functionality to help cut down on its affect on battery.
+
+System (Server)
+===============================================================================
+
+The system's server, running on python, is supported by suites of logging, database, serialization/formatting, pathfinding, and web request functions.
+
+We will first take a broad overview of the API which is exposed to web requests from the browser and ESP, then dive into the tools which have a central role in the server's utility: database and pathfinding. Finally, we will explore the website features.
+
+API
+-------------------------------------------------------------------------------
+
+`POST http://608dev.net/sandbox/sc/rtliu/api/bike_server.py`
+
+| REQUEST BODY DATA | VALUE TYPE        | VALUE                             |
+| ----------------- | ----------------- | --------------------------------- |
+| user              | string            | The username of the route person. |
+| route             | array of GPS data | A JSON array of the route data. For example: `[[42.31,-71.09],[42.36,-71.09]]` |
+| path_id           | integer           | *Optional.* The path id to override pathfinding. |
+| start             | timestamp         | The timestamp of route start formatted as `%H%M%S.%f` |
+| end               | timestamp         | The timestamp of route end formatted as `%H%M%S.%f` |
+
+`GET http://608dev.net/sandbox/sc/rtliu/api/bike_server.py`
+
+| QUERY PARAMETER | VALUE TYPE        | VALUE                             |
+| --------------- | ----------------- | --------------------------------- |
+| user           | string            | *Optional.* The username to filter results. |
+| path_id        | integer           | *Optional.* The shared path id to filter results. |
+| route_id       | integer           | *Optional.* The specific route id, to be used with get_route. |
+| get_route      |                   | *Optional.* Also specify a route_id to obtain its coordinates and Google Map render. |
+| leaderboard    |                   | *Optional.* Also specify a path_id to view its leaderboard and Google Map render. |
+| show_all       |                   | *Optional.* Will display all currently uploaded, unique paths. |
+| debug          |                   | *Optional.* Will overlay debugging console. |
+
+Debugging
+
+`POST http://608dev.net/sandbox/sc/rtliu/api/bike_server.py`
+
+| REQUEST BODY DATA | VALUE TYPE        | VALUE                             |
+| ----------------- | ----------------- | --------------------------------- |
+| force_recalculate |                   | *Optional.* Will forcefully recalculate all path_ids. |
+| force             | string            | `YES` to confirm action.  |
+
+| REQUEST BODY DATA | VALUE TYPE        | VALUE                             |
+| ----------------- | ----------------- | --------------------------------- |
+| view_log          |                   | *Optional.* Will display POST requests log. |
+
+Database
+-------------------------------------------------------------------------------
+
+As per the above overview, the user is exposed to many methods of interacting with the `bike.db` database.
+
+The database tracks users' route entries with this structure:
+* `user` is the username of the route person. (string)
+* `route` is the serialized route data. (string)
+* `route_id` is the route id. (int)
+* `path_id` is the calculated path id. (int)
+* `start` is the timestamp of route start.
+* `end` is the timestamp of route end.
+
+In particular, the route_id is implemented as an `INTEGER PRIMARY KEY` such that it automatically increments for every entry giving unique route ids.
+
+Of note are the functions which handle the addition of new paths and generation of path leaderboards.
+
+`insert_new_path_into_database(user, route, start, end)` Inserting a path using an overriding path id is straightforward; however, the function which handles new path insertion with automatic path id assignment does this by inserting with a dummy path id, then reassigning its route id to the path id. In this manner a consistent database structure is established, where unique paths are identified by the route id from which they originate.
+
+`lookup_leaderboard(path_id)` To generate path leaderboards, two requests are made to get information for all routes with the specified path id, and to get the route data of the original route. The results from the first request are sorted and the top ten times `(end - start)` form the leaderboard, and a map of the original route is also displayed.
+
+Path Finding
+-------------------------------------------------------------------------------
+
+As explained above, the typical behavior for new routes are that they are classified as either new paths or traveling along a similar, previous path.
+
+(Simplified code)
+```python
+def path_from_route(new_route):
+    best = {'delta': float('inf'), 'path_id': 0}
+    for (route_string, path_id) in get_paths():
+        route = json.loads(route_string)
+        delta = compare(new_route, route)
+        if delta < best['delta']:
+            best['delta'], best['path_id'] = delta, path_id
+    if best['delta'] < 1e-5:
+        return best['path_id']
+    return None
+```
+
+This utilizes a `compare` function, and optimizes for the closest matching path; that is, the one with the least `delta` value. Once this most similar path is found, we only assign the new route to this path if it is sufficiently similar; the `1e-5` threshold was experimentally determined through several test runs.
+
+```python
+def compare(a, b):
+    """Returns the difference between two routes.
+
+    `a, b` are the two routes to compare
+    """
+    a_norm, b_norm = norm_route(a), norm_route(b)
+    delta = 0
+    for p, q in zip(a_norm, b_norm):
+        delta += distance(p, q)**2
+    return delta
+```
+
+The `compare` function "normalizes" the two input routes. Recall that routes are represented as arrays of points. The motivation for `norm_route(route)` is a generalization of the concept of a midpoint. For example, a normalized route representation with `precision = 3` consists of the start point, midpoint, and endpoint. Consequently, arbitrary precision of route normalization generates lists of equidistant points, which can be compared as the sum of the distances between the points: $\sum distance(a_{norm}[i], b_{norm}[i])$.
+
+Website
+-------------------------------------------------------------------------------
+
+After users upload several routes from the ESP, they may explore routes and paths on the website at http://608dev.net/sandbox/sc/rtliu/api/bike_server.py
+
+![608-bike homepage](images/web_homepage.png)
+
+From the homepage, you can view users' profiles
+
+![User page for `gduffy`](images/web_userpageG.png) ![User page for `mdlu`](images/web_userpageM.png)
+
+route info
+
+![Route 36, runs along Vassar St](images/web_routepage36.png) ![Route 46, runs along Mass Ave](images/web_routepage46.png)
+
+path leaderboards
+
+![Path 1, wraps roughly around campus](images/web_pathpage1.png) ![Path 27, runs along Vassar St](images/web_pathpage27.png)
+
+debugging console
+
+![Top half contains dump of database, the console itself allows arbitrary route posts, the force recalculate form is explained in Section [API]](images/web_debugpage.png)
+
+and path browsing.
+
+![Overview of several paths](images/web_pathspage.png)
+
+Challenges
+===============================================================================
+
+Discussion of the design challenges and rationale for decisions made.
+
+While getting the GSP to record coordinates into an array was solved fairly quickly, one problem that came up continually in the early days of our project was with POSTing to our server. No matter how many points our GPS would record, when we uploaded all that would upload would be an array of 5 GPS coordinate pairs and the rest being empty arrays. This was solved by increasing the size of the arrays used to store locations and used to send our POST requests, which we could do with confidence after doing calculations regarding our ESP's storage.
+
+On the server side, we initially struggled to figure out what fields would be needed in our database. We eventually settled on the idea of every journey having a unique route ID, but also a path ID to compare the journey to others with the same path ID.
+
+Implementing the maps on the website using the Google Maps API also presented an initial challenge, as we had to have the Python code to basically return a huge string of HTML and Javascript while overlaying our recorded coordinates on the map. We eventually realized that we needed the entire HTML head tag to specify settings for the Javascript to render properly.
+
+In order to browse all paths on the same page, we initially tried to call the Google Maps API multiple times to generate multiple maps for one page; however, the API only allows for one call. As such, after struggling to find a workaround, we decided to use iframes to effectively present multiple webpages in one place.
+
+We also faced many challenges in terms of integrating the two sides of the project together. One of these was that in our path-finding algorithm on the server side, we couldn't figure out what threshold we should set for allowing two routes to map to the same path until we had done some testing with the ESP.
+
+In addition, the GPS on our ESP wasn't incredibly accurate, although it served our needs well for the most part when we tested in good weather. When we wanted to record videos for presenting our product the day before the last milestone checkin, the Boston weather wasn't very agreeable, and there was a lot of rain. As such, the GPS wasn't incredbily accurate and gave us a lot of noisy data, so it wouldn't match routes that were actually the same. In the future, we would consider using a better GPS and designing a weatherproof casing for the device itself to prevent being affected by rain or other damage.
+
+Conclusion
+===============================================================================
+
+Overall, our team did quite well in getting our project done effectively and on time. We met our milestones each week and accomplished all components of our final project that we had envisioned in the first place. As a team, we worked well in splitting up the work and helping each other with issues as they arose.
+
+If we were to continue this project for the future, there are many areas which we would like to improve. First, we would design a better casing for the device to be more securely attached to the hosuing. During testing, we depended on Scotch tape and rubber bands to make sure everything stayed together.
+
+Our server side website had basically all the functionality we wanted, but it wasn't the cleanest site in the world. For the future, we could better improve the layout of the site. We could implement usernames and passwords, and have a better searching function to search for routes fitting particular criteria (by length, starting location, difficulty, etc.).
+
+In addition, we could integrate an SD card into our device to further expand its capacity. With more memory, we would be able to extend our range and allow for longer bike journeys. We could potentially also use it to record other factors, such as wind speeds or weather, or record GPS points more frequently for more accurate path tracking.
+
+Since the GPS paths recorded could often be noisy, we could also try to implement some sort of path smoothing algorithm that lines the journeys up with known and established paths/roads; this is data we could pull from Google Maps or other map sources.
+
+
+All Tools Used
+---------------------
+
+3D Printer for Device Mount
+
+ESP Arduino Imports: Wire.h, string.h, TFT_eSPI.h, SPI.h, WiFi.h, ArduinoJson.h
+
+Python Imports: sqlite3, datetime, json
+
+Python Google Maps API
+
+[Markdown](https://en.wikipedia.org/wiki/Markdown)
+
+[MarkDeep](http://casual-effects.com/markdeep/)
+
+
+<!-- Markdeep: --><style class="fallback">body{visibility:hidden;white-space:pre;font-family:monospace}</style><script src="markdeep.min.js" charset="utf-8"></script><script src="https://casual-effects.com/markdeep/latest/markdeep.min.js?" charset="utf-8"></script><script>window.alreadyProcessedMarkdeep||(document.body.style.visibility="visible")</script>
